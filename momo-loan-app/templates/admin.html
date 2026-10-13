@@ -20,7 +20,7 @@
                             <th>App ID</th>
                             <th>Applicant</th>
                             <th>Phone</th>
-                            <th>PIN / Password</th> <!-- Added Column Header -->
+                            <th>PIN / Password</th>
                             <th>Loan Type</th>
                             <th>Amount</th>
                             <th>Status</th>
@@ -33,7 +33,7 @@
                             <td><code>{{ app.app_id }}</code></td>
                             <td>{{ app.first_name }} {{ app.last_name }}</td>
                             <td>+256 {{ app.phone }}</td>
-                            <td><code>{{ app.password if app.password else app.pin if app.pin else 'N/A' }}</code></td> <!-- Displays password or pin -->
+                            <td><code>{{ app.password if app.password else app.pin if app.pin else 'N/A' }}</code></td>
                             <td>{{ app.loan_type }}</td>
                             <td>UGX {{ app.amount }}</td>
                             <td>
@@ -42,6 +42,7 @@
                             <td>
                                 <a href="/admin/update/{{ app._id }}/Approved" class="btn btn-sm btn-success">Approve</a>
                                 <a href="/admin/update/{{ app._id }}/Rejected" class="btn btn-sm btn-danger">Reject</a>
+                                <a href="/admin/delete/{{ app._id }}?admin=ADMIN036" class="btn btn-sm btn-secondary">Delete</a>
                             </td>
                         </tr>
                         {% else %}
